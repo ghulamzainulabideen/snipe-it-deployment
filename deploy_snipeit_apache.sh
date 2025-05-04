@@ -1,98 +1,57 @@
 #!/bin/bash
-
 set -e
 
-APP_DIR="/var/www/snipe-it"
-REPO_URL="https://github.com/snipe/snipe-it.git"
-DB_NAME="snipeit"
-DB_USER="snipeituser"
-DB_PASS="snipeitpass"
-APP_URL="http://$(hostname -I | awk '{print $1}')"
+log() {
+  echo -e "\033[1;32m👉 $1\033[0m"
+}
 
-echo "🔄 Updating system..."
-sudo apt update && sudo apt upgrade -y
+# Ensure we're running as root
+if [ "$EUID" -ne 0 ]; then
+  echo "Please run as root"
+  exit 1
+fi
 
-echo "🧰 Installing dependencies..."
-sudo apt install -y apache2 php php-cli php-common php-curl php-mbstring php-mysql php-xml php-bcmath php-gd php-zip php-readline php-tokenizer php-intl php-sqlite3 unzip curl git mariadb-server composer supervisor
+log "🔧 Updating package index and upgrading system..."
+apt update && apt upgrade -y
 
-echo "🧼 Cleaning up existing install (if any)..."
-sudo systemctl stop apache2 || true
-sudo rm -rf "$APP_DIR"
-sudo mkdir -p "$APP_DIR"
+log "📦 Installing dependencies..."
+apt install -y software-properties-common curl gnupg2 ca-certificates lsb-release unzip zip git nginx mariadb-server php-cli php-common php-mbstring php-xml php-curl php-mysql php-zip php-bcmath php-gd php-intl php-readline
 
-echo "🐙 Cloning Snipe-IT repository..."
-sudo git clone "$REPO_URL" "$APP_DIR"
-cd "$APP_DIR"
+log "🧼 Cleaning up existing install (if any)..."
+rm -rf /var/www/snipe-it
 
-echo "🔐 Setting permissions..."
-sudo chown -R www-data:www-data "$APP_DIR"
-sudo chmod -R 755 "$APP_DIR"
+log "🐙 Cloning Snipe-IT repository..."
+git clone https://github.com/snipe/snipe-it /var/www/snipe-it
+cd /var/www/snipe-it
 
-echo "🧱 Installing Composer dependencies..."
-sudo composer install --no-dev --optimize-autoloader
+log "🔐 Setting permissions..."
+chown -R www-data:www-data /var/www/snipe-it
+chmod -R 755 /var/www/snipe-it
 
-echo "🛠️ Creating .env file..."
-sudo cp .env.example .env
+log "🧪 Checking PHP version..."
+CURRENT_PHP=$(php -r 'echo PHP_VERSION;')
+REQUIRED_PHP=8.2
 
-echo "⚙️ Configuring environment variables..."
-sudo sed -i "s|APP_URL=.*|APP_URL=${APP_URL}|" .env
-sudo sed -i "s/DB_DATABASE=.*/DB_DATABASE=${DB_NAME}/" .env
-sudo sed -i "s/DB_USERNAME=.*/DB_USERNAME=${DB_USER}/" .env
-sudo sed -i "s/DB_PASSWORD=.*/DB_PASSWORD=${DB_PASS}/" .env
+if dpkg --compare-versions "$CURRENT_PHP" lt "$REQUIRED_PHP"; then
+  log "⚠️ PHP version is $CURRENT_PHP. Upgrading to PHP 8.3..."
 
-echo "🗄️ Setting up MySQL database..."
-sudo mysql -u root <<EOF
-DROP DATABASE IF EXISTS ${DB_NAME};
-CREATE DATABASE ${DB_NAME} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-DROP USER IF EXISTS '${DB_USER}'@'localhost';
-CREATE USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
-GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'localhost';
-FLUSH PRIVILEGES;
-EOF
+  add-apt-repository ppa:ondrej/php -y
+  apt update
+  apt install -y php8.3 php8.3-{cli,fpm,common,mbstring,xml,curl,mysql,zip,bcmath,gd,intl,readline}
 
-echo "🔑 Generating application key..."
-sudo php artisan key:generate
+  update-alternatives --set php /usr/bin/php8.3
+  update-alternatives --set phar /usr/bin/phar8.3
+  update-alternatives --set phar.phar /usr/bin/phar.phar8.3
 
-echo "📦 Running database migrations..."
-sudo php artisan migrate --seed --force
+  log "✅ PHP upgraded to $(php -r 'echo PHP_VERSION;')"
+else
+  log "✅ PHP version $CURRENT_PHP is sufficient."
+fi
 
-echo "🌐 Configuring Apache..."
-SNIPE_CONF="/etc/apache2/sites-available/snipeit.conf"
-sudo tee "$SNIPE_CONF" > /dev/null <<EOF
-<VirtualHost *:80>
-    ServerAdmin webmaster@localhost
-    DocumentRoot $APP_DIR/public
-    <Directory $APP_DIR/public>
-        AllowOverride All
-        Require all granted
-    </Directory>
-    ErrorLog \${APACHE_LOG_DIR}/snipeit_error.log
-    CustomLog \${APACHE_LOG_DIR}/snipeit_access.log combined
-</VirtualHost>
-EOF
+log "🧱 Installing Composer dependencies..."
+cd /var/www/snipe-it
+curl -sS https://getcomposer.org/installer | php
+mv composer.phar /usr/local/bin/composer
+composer install --no-dev --optimize-autoloader
 
-sudo a2dissite 000-default.conf
-sudo a2ensite snipeit.conf
-sudo a2enmod rewrite
-sudo systemctl reload apache2
-
-echo "🧃 Configuring Supervisor for queue worker..."
-SUPERVISOR_CONF="/etc/supervisor/conf.d/snipeit.conf"
-sudo tee "$SUPERVISOR_CONF" > /dev/null <<EOF
-[program:snipeit]
-process_name=%(program_name)s_%(process_num)02d
-command=php $APP_DIR/artisan queue:work --tries=3
-autostart=true
-autorestart=true
-user=www-data
-numprocs=1
-redirect_stderr=true
-stdout_logfile=$APP_DIR/storage/logs/worker.log
-EOF
-
-sudo supervisorctl reread
-sudo supervisorctl update
-sudo supervisorctl start snipeit
-
-echo "✅ Snipe-IT installation completed successfully!"
-echo "🌍 Access it at: ${APP_URL}"
+log "✅ Snipe-IT is installed and ready. You can now configure your .env file and web server."
