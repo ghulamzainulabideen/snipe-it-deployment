@@ -1,57 +1,86 @@
 #!/bin/bash
+
+# Exit on error
 set -e
 
-log() {
-  echo -e "\033[1;32m👉 $1\033[0m"
-}
+# Variables
+MYSQL_ROOT_PASSWORD="Mis@$0786"
+DB_NAME="tms"
+DB_USER="tms"
+DB_PASS="Mis@$0786"
+ADMIN_EMAIL="samis.home@punjab.gov.pk"
+ADMIN_PASSWORD="Mis@$1441420"
+APP_URL="http://$(hostname -I | awk '{print $1}')"
+TIMEZONE="Asia/Karachi"
 
-# Ensure we're running as root
-if [ "$EUID" -ne 0 ]; then
-  echo "Please run as root"
-  exit 1
-fi
-
-log "🔧 Updating package index and upgrading system..."
+echo "🧼 Updating system..."
 apt update && apt upgrade -y
 
-log "📦 Installing dependencies..."
-apt install -y software-properties-common curl gnupg2 ca-certificates lsb-release unzip zip git nginx mariadb-server php-cli php-common php-mbstring php-xml php-curl php-mysql php-zip php-bcmath php-gd php-intl php-readline
+echo "🐬 Installing MariaDB..."
+debconf-set-selections <<< "mariadb-server mariadb-server/root_password password $MYSQL_ROOT_PASSWORD"
+debconf-set-selections <<< "mariadb-server mariadb-server/root_password_again password $MYSQL_ROOT_PASSWORD"
+apt install -y mariadb-server mariadb-client
 
-log "🧼 Cleaning up existing install (if any)..."
+echo "🔧 Configuring MariaDB..."
+mysql -uroot -p"$MYSQL_ROOT_PASSWORD" <<MYSQL_SCRIPT
+CREATE DATABASE IF NOT EXISTS $DB_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';
+GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';
+FLUSH PRIVILEGES;
+MYSQL_SCRIPT
+
+echo "🌐 Installing Apache, PHP 8.3, and dependencies..."
+add-apt-repository ppa:ondrej/php -y
+apt update
+apt install -y apache2 php8.3 libapache2-mod-php8.3 php8.3-{cli,mbstring,xml,bcmath,curl,zip,gd,mysql} unzip git curl composer
+
+echo "📁 Installing Snipe-IT..."
 rm -rf /var/www/snipe-it
-
-log "🐙 Cloning Snipe-IT repository..."
 git clone https://github.com/snipe/snipe-it /var/www/snipe-it
 cd /var/www/snipe-it
 
-log "🔐 Setting permissions..."
+cp .env.example .env
+sed -i "s|APP_URL=.*|APP_URL=$APP_URL|" .env
+sed -i "s|DB_DATABASE=.*|DB_DATABASE=$DB_NAME|" .env
+sed -i "s|DB_USERNAME=.*|DB_USERNAME=$DB_USER|" .env
+sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=$DB_PASS|" .env
+sed -i "s|APP_TIMEZONE=.*|APP_TIMEZONE=$TIMEZONE|" .env
+
+echo "🧱 Installing PHP dependencies with Composer..."
+composer install --no-interaction --prefer-dist --optimize-autoloader
+
+echo "🔐 Setting permissions..."
 chown -R www-data:www-data /var/www/snipe-it
 chmod -R 755 /var/www/snipe-it
 
-log "🧪 Checking PHP version..."
-CURRENT_PHP=$(php -r 'echo PHP_VERSION;')
-REQUIRED_PHP=8.2
+echo "🔑 Generating app key, running migrations, and seeding..."
+php artisan key:generate --force
+php artisan migrate --force
+php artisan db:seed --force
 
-if dpkg --compare-versions "$CURRENT_PHP" lt "$REQUIRED_PHP"; then
-  log "⚠️ PHP version is $CURRENT_PHP. Upgrading to PHP 8.3..."
+echo "🧍 Creating admin user..."
+php artisan snipeit:create-admin --email="$ADMIN_EMAIL" --password="$ADMIN_PASSWORD" --first_name="Sami" --last_name="Admin"
 
-  add-apt-repository ppa:ondrej/php -y
-  apt update
-  apt install -y php8.3 php8.3-{cli,fpm,common,mbstring,xml,curl,mysql,zip,bcmath,gd,intl,readline}
+echo "🌍 Configuring Apache..."
+cat > /etc/apache2/sites-available/snipeit.conf <<EOF
+<VirtualHost *:80>
+    ServerAdmin webmaster@localhost
+    DocumentRoot /var/www/snipe-it/public
 
-  update-alternatives --set php /usr/bin/php8.3
-  update-alternatives --set phar /usr/bin/phar8.3
-  update-alternatives --set phar.phar /usr/bin/phar.phar8.3
+    <Directory /var/www/snipe-it/public>
+        Options Indexes FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
 
-  log "✅ PHP upgraded to $(php -r 'echo PHP_VERSION;')"
-else
-  log "✅ PHP version $CURRENT_PHP is sufficient."
-fi
+    ErrorLog \${APACHE_LOG_DIR}/error.log
+    CustomLog \${APACHE_LOG_DIR}/access.log combined
+</VirtualHost>
+EOF
 
-log "🧱 Installing Composer dependencies..."
-cd /var/www/snipe-it
-curl -sS https://getcomposer.org/installer | php
-mv composer.phar /usr/local/bin/composer
-composer install --no-dev --optimize-autoloader
+a2dissite 000-default.conf
+a2ensite snipeit.conf
+a2enmod rewrite
+systemctl reload apache2
 
-log "✅ Snipe-IT is installed and ready. You can now configure your .env file and web server."
+echo "✅ Snipe-IT installed and ready at $APP_URL"
