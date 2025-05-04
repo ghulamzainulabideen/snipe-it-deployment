@@ -1,88 +1,68 @@
 #!/bin/bash
 
-# ────────────────────────────────────────────────────────────────
-# Deploy Snipe-IT on Ubuntu 22.04 with Apache, PHP 8.3, MySQL
-# Author: ChatGPT (OpenAI) + User Customizations
-# ────────────────────────────────────────────────────────────────
+set -e
 
-set -euo pipefail
-
-# ─── Settings ───────────────────────────────────────────────────
-SNIPEIT_DIR="/var/www/snipe-it"
+APP_DIR="/var/www/snipe-it"
+REPO_URL="https://github.com/snipe/snipe-it.git"
 DB_NAME="snipeit"
-DB_USER="snipeuser"
-DB_PASS="snipepass"
-ADMIN_EMAIL="admin@example.com"
+DB_USER="snipeituser"
+DB_PASS="snipeitpass"
 APP_URL="http://$(hostname -I | awk '{print $1}')"
 
-# ─── Functions ───────────────────────────────────────────────────
-echo_section() {
-  echo -e "\n\033[1;32m[+] $1\033[0m"
-}
-
-# ─── Prerequisites ───────────────────────────────────────────────
-echo_section "Updating system packages..."
+echo "🔄 Updating system..."
 sudo apt update && sudo apt upgrade -y
 
-# ─── Install PHP 8.3 ─────────────────────────────────────────────
-echo_section "Installing PHP 8.3 and dependencies..."
-sudo apt install -y software-properties-common
-sudo add-apt-repository ppa:ondrej/php -y
-sudo apt update
-sudo apt install -y php8.3 php8.3-cli php8.3-mbstring php8.3-bcmath php8.3-curl php8.3-xml php8.3-mysql php8.3-zip php8.3-common php8.3-gd php8.3-readline php8.3-soap php8.3-intl php8.3-pgsql php8.3-fpm
+echo "🧰 Installing dependencies..."
+sudo apt install -y apache2 php php-cli php-common php-curl php-mbstring php-mysql php-xml php-bcmath php-gd php-zip php-readline php-tokenizer php-intl php-sqlite3 unzip curl git mariadb-server composer supervisor
 
-sudo update-alternatives --set php /usr/bin/php8.3
+echo "🧼 Cleaning up existing install (if any)..."
+sudo systemctl stop apache2 || true
+sudo rm -rf "$APP_DIR"
+sudo mkdir -p "$APP_DIR"
 
-# ─── Install Apache, MariaDB, Composer ───────────────────────────
-echo_section "Installing Apache, MariaDB, Git, and Composer..."
-sudo apt install -y apache2 mariadb-server unzip curl git
-curl -sS https://getcomposer.org/installer | php
-sudo mv composer.phar /usr/local/bin/composer
+echo "🐙 Cloning Snipe-IT repository..."
+sudo git clone "$REPO_URL" "$APP_DIR"
+cd "$APP_DIR"
 
-# ─── Configure MariaDB ───────────────────────────────────────────
-echo_section "Configuring MariaDB..."
+echo "🔐 Setting permissions..."
+sudo chown -R www-data:www-data "$APP_DIR"
+sudo chmod -R 755 "$APP_DIR"
+
+echo "🧱 Installing Composer dependencies..."
+sudo composer install --no-dev --optimize-autoloader
+
+echo "🛠️ Creating .env file..."
+sudo cp .env.example .env
+
+echo "⚙️ Configuring environment variables..."
+sudo sed -i "s|APP_URL=.*|APP_URL=${APP_URL}|" .env
+sudo sed -i "s/DB_DATABASE=.*/DB_DATABASE=${DB_NAME}/" .env
+sudo sed -i "s/DB_USERNAME=.*/DB_USERNAME=${DB_USER}/" .env
+sudo sed -i "s/DB_PASSWORD=.*/DB_PASSWORD=${DB_PASS}/" .env
+
+echo "🗄️ Setting up MySQL database..."
 sudo mysql -u root <<EOF
-CREATE DATABASE IF NOT EXISTS ${DB_NAME} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
+DROP DATABASE IF EXISTS ${DB_NAME};
+CREATE DATABASE ${DB_NAME} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+DROP USER IF EXISTS '${DB_USER}'@'localhost';
+CREATE USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
 GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'localhost';
 FLUSH PRIVILEGES;
 EOF
 
-# ─── Clone Snipe-IT ──────────────────────────────────────────────
-echo_section "Cloning Snipe-IT repository..."
-sudo rm -rf ${SNIPEIT_DIR}
-sudo git clone https://github.com/snipe/snipe-it ${SNIPEIT_DIR}
-sudo chown -R $USER:www-data ${SNIPEIT_DIR}
-cd ${SNIPEIT_DIR}
-
-# ─── Install Dependencies ────────────────────────────────────────
-echo_section "Installing PHP dependencies via Composer..."
-composer install --no-dev --prefer-dist
-
-# ─── Environment Configuration ───────────────────────────────────
-echo_section "Copying .env file..."
-cp .env.example .env
-
-sed -i "s|APP_URL=http://localhost|APP_URL=${APP_URL}|g" .env
-sed -i "s|DB_DATABASE=homestead|DB_DATABASE=${DB_NAME}|g" .env
-sed -i "s|DB_USERNAME=homestead|DB_USERNAME=${DB_USER}|g" .env
-sed -i "s|DB_PASSWORD=secret|DB_PASSWORD=${DB_PASS}|g" .env
-
-# ─── Laravel Key & Migrations ────────────────────────────────────
-echo_section "Setting application key..."
+echo "🔑 Generating application key..."
 sudo php artisan key:generate
 
-echo_section "Running migrations and seeding database..."
+echo "📦 Running database migrations..."
 sudo php artisan migrate --seed --force
 
-# ─── Apache Configuration ────────────────────────────────────────
-echo_section "Configuring Apache..."
-SITE_CONF="/etc/apache2/sites-available/snipeit.conf"
-sudo tee ${SITE_CONF} > /dev/null <<EOF
+echo "🌐 Configuring Apache..."
+SNIPE_CONF="/etc/apache2/sites-available/snipeit.conf"
+sudo tee "$SNIPE_CONF" > /dev/null <<EOF
 <VirtualHost *:80>
     ServerAdmin webmaster@localhost
-    DocumentRoot ${SNIPEIT_DIR}/public
-    <Directory ${SNIPEIT_DIR}/public>
+    DocumentRoot $APP_DIR/public
+    <Directory $APP_DIR/public>
         AllowOverride All
         Require all granted
     </Directory>
@@ -91,28 +71,28 @@ sudo tee ${SITE_CONF} > /dev/null <<EOF
 </VirtualHost>
 EOF
 
-sudo a2ensite snipeit
+sudo a2dissite 000-default.conf
+sudo a2ensite snipeit.conf
 sudo a2enmod rewrite
 sudo systemctl reload apache2
 
-# ─── Configure Supervisor ────────────────────────────────────────
-echo_section "Configuring Supervisor for queue management..."
+echo "🧃 Configuring Supervisor for queue worker..."
 SUPERVISOR_CONF="/etc/supervisor/conf.d/snipeit.conf"
-sudo tee ${SUPERVISOR_CONF} > /dev/null <<EOF
+sudo tee "$SUPERVISOR_CONF" > /dev/null <<EOF
 [program:snipeit]
 process_name=%(program_name)s_%(process_num)02d
-command=php ${SNIPEIT_DIR}/artisan queue:work --sleep=3 --tries=3
+command=php $APP_DIR/artisan queue:work --tries=3
 autostart=true
 autorestart=true
 user=www-data
 numprocs=1
 redirect_stderr=true
-stdout_logfile=/var/log/supervisor/snipeit.log
+stdout_logfile=$APP_DIR/storage/logs/worker.log
 EOF
 
 sudo supervisorctl reread
 sudo supervisorctl update
+sudo supervisorctl start snipeit
 
-# ─── Done ────────────────────────────────────────────────────────
-echo -e "\n✅ Snipe-IT installation and configuration completed."
-echo "Access it at: ${APP_URL}/"
+echo "✅ Snipe-IT installation completed successfully!"
+echo "🌍 Access it at: ${APP_URL}"
