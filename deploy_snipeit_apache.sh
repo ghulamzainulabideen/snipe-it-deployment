@@ -1,68 +1,63 @@
 #!/bin/bash
 
-# Automated Snipe-IT deployment script using Apache on Ubuntu 22.04
+# Ensure the script is run as root
+if [[ $EUID -ne 0 ]]; then
+   echo "This script must be run as root. Try using: sudo $0"
+   exit 1
+fi
 
-set -e
-
-echo "Updating system packages..."
-sudo apt update && sudo apt upgrade -y
-
-echo "Installing required packages..."
-sudo apt install -y apache2 mariadb-server php php-mysql php-curl php-mbstring php-xml php-bcmath php-zip php-gd php-cli unzip git curl composer supervisor
+echo "Updating and installing dependencies..."
+apt update && apt upgrade -y
+apt install -y apache2 mysql-server php php-cli php-mysql php-curl php-mbstring php-xml php-bcmath php-zip php-gd php-tokenizer php-fileinfo unzip curl git composer supervisor
 
 echo "Cloning Snipe-IT repository..."
-sudo git clone https://github.com/snipe/snipe-it /var/www/snipe-it
+git clone https://github.com/snipe/snipe-it /var/www/snipe-it
 cd /var/www/snipe-it
 
 echo "Setting ownership..."
-sudo chown -R www-data:www-data /var/www/snipe-it
-sudo chmod -R 755 /var/www/snipe-it
+chown -R www-data:www-data /var/www/snipe-it
+chmod -R 755 /var/www/snipe-it
+
+echo "Installing PHP dependencies via Composer..."
+sudo -u www-data composer install --no-dev --prefer-source
 
 echo "Copying .env file..."
-cp .env.example .env
-
-echo "Installing PHP dependencies with Composer..."
-sudo -u www-data composer install --no-interaction --prefer-dist --optimize-autoloader
-
-echo "Generating application key..."
-sudo -u www-data php artisan key:generate
+sudo -u www-data cp .env.example .env
 
 echo "Configuring .env file..."
-sed -i 's/DB_DATABASE=homestead/DB_DATABASE=snipeit/' .env
-sed -i 's/DB_USERNAME=homestead/DB_USERNAME=root/' .env
-sed -i 's/DB_PASSWORD=secret/DB_PASSWORD=/' .env
+sed -i "s/DB_DATABASE=homestead/DB_DATABASE=snipeit/" .env
+sed -i "s/DB_USERNAME=homestead/DB_USERNAME=root/" .env
+sed -i "s/DB_PASSWORD=secret/DB_PASSWORD=/" .env
 
-echo "Creating database..."
-sudo mysql -u root -e "CREATE DATABASE IF NOT EXISTS snipeit CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+echo "Setting application key..."
+sudo -u www-data php artisan key:generate --force
 
 echo "Running migrations and seeding database..."
-sudo -u www-data php artisan migrate --seed --force
+sudo -u www-data php artisan migrate --force
+sudo -u www-data php artisan db:seed --force
 
 echo "Configuring Apache..."
-sudo tee /etc/apache2/sites-available/snipeit.conf > /dev/null <<EOL
+cat <<EOL > /etc/apache2/sites-available/snipeit.conf
 <VirtualHost *:80>
     ServerAdmin admin@example.com
     DocumentRoot /var/www/snipe-it/public
-    ServerName snipeit.local
-
     <Directory /var/www/snipe-it/public>
-        Options Indexes FollowSymLinks MultiViews
+        Options Indexes FollowSymLinks
         AllowOverride All
         Require all granted
     </Directory>
-
     ErrorLog \${APACHE_LOG_DIR}/snipeit_error.log
     CustomLog \${APACHE_LOG_DIR}/snipeit_access.log combined
 </VirtualHost>
 EOL
 
-sudo a2ensite snipeit
-sudo a2enmod rewrite
-sudo systemctl reload apache2
-sudo systemctl restart apache2
+a2ensite snipeit.conf
+a2enmod rewrite
+systemctl reload apache2
+systemctl restart apache2
 
 echo "Configuring Supervisor for queue management..."
-sudo tee /etc/supervisor/conf.d/snipeit.conf > /dev/null <<EOL
+cat <<EOF > /etc/supervisor/conf.d/snipeit-worker.conf
 [program:snipeit]
 process_name=%(program_name)s_%(process_num)02d
 command=php /var/www/snipe-it/artisan queue:work --sleep=3 --tries=3
@@ -72,10 +67,11 @@ user=www-data
 numprocs=1
 redirect_stderr=true
 stdout_logfile=/var/www/snipe-it/storage/logs/worker.log
-EOL
+EOF
 
-sudo supervisorctl reread
-sudo supervisorctl update
-sudo supervisorctl start snipeit
+supervisorctl reread
+supervisorctl update
+supervisorctl start snipeit:*
 
-echo "Snipe-IT deployment complete! Access it via your server IP or hostname."
+echo "✅ Snipe-IT installation and configuration completed."
+echo "Access it at: http://your-server-ip/"
